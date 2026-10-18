@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>Dammen 3D</title>
+<style>
+  body { margin:0; overflow:hidden; background:#1a1d2e; font-family:system-ui,sans-serif; color:#fff; }
+  #hud { position:fixed; top:16px; left:0; right:0; text-align:center; font-size:20px; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #hud b { display:inline-block; width:14px; height:14px; border-radius:50%; vertical-align:middle; margin-right:6px; border:1px solid #888; }
+  #score { position:fixed; top:52px; left:0; right:0; text-align:center; font-size:15px; opacity:.85; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #terug { position:fixed; top:16px; left:16px; color:#fff; text-decoration:none; background:rgba(255,255,255,.12); padding:6px 12px; border-radius:8px; font-size:14px; }
+  #naam { position:fixed; top:16px; left:195px; display:flex; gap:6px; }
+  #naam input { padding:6px 10px; border-radius:6px; border:0; font-size:14px; }
+  #naam button { padding:6px 10px; border-radius:6px; border:0; cursor:pointer; }
+  #mute { position:fixed; top:16px; right:16px; background:rgba(255,255,255,.12); border:0; color:#fff; font-size:20px; border-radius:8px; padding:6px 10px; cursor:pointer; }
+  #reset { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:10px 22px; font-size:16px; border:0; border-radius:8px; background:#fff; color:#1a1d2e; cursor:pointer; display:none; }
+  #regels { position:fixed; bottom:16px; right:16px; font-size:12px; opacity:.55; text-align:right; pointer-events:none; }
+</style>
+</head>
+<body><script src="/kamer.js"></script>
+<a id="terug" href="/" onclick="this.href='/'+location.search">‹ Menu</a><span style="position:fixed;top:17px;left:92px;font-size:13px;opacity:.75;background:rgba(0,0,0,.35);padding:5px 9px;border-radius:8px;z-index:3;pointer-events:none;text-shadow:none" id="kamerlbl"></span><script>(function(){document.getElementById("kamerlbl").textContent="kamer "+window.KAMER;})()</script>
+<div id="hud">Verbinden…</div>
+<div id="score"></div>
+<div id="naam"><input id="naamIn" maxlength="14" placeholder="Jouw naam"><button id="naamOk">OK</button></div>
+<button id="mute" title="Geluid aan/uit">🔊</button>
+<button id="reset">Nieuw spel</button>
+<div id="regels">Slaan is verplicht · meerslag · vliegende dam<br>Sleep de muis om te draaien</div>
+<script type="importmap">{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+
+const N = 10;
+const hud = document.getElementById('hud'), resetBtn = document.getElementById('reset');
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight); renderer.shadowMap.enabled = true; renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.3); sun.position.set(6, 12, 6); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = sun.shadow.camera.bottom = -8; sun.shadow.camera.right = sun.shadow.camera.top = 8;
+scene.add(sun);
+
+// Achtergrond-shader (zelfde sfeer als vier op een rij)
+const clock = new THREE.Clock();
+const bgMat = new THREE.ShaderMaterial({ depthWrite: false, depthTest: false,
+  uniforms: { uTime: { value: 0 }, uRes: { value: new THREE.Vector2(innerWidth, innerHeight) } },
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `uniform float uTime; uniform vec2 uRes;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    float noise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y); }
+    float fbm(vec2 p){ float v=0.0, a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.1; a*=0.5; } return v; }
+    void main(){ vec2 uv = gl_FragCoord.xy/uRes; vec2 p = (uv-0.5)*vec2(uRes.x/uRes.y,1.0); float t = uTime*0.05;
+      float n = fbm(p*2.0 + vec2(t, -t*0.7)); float n2 = fbm(p*3.0 - vec2(t*0.6, t*0.3));
+      vec3 col = mix(vec3(0.10,0.07,0.06), vec3(0.28,0.16,0.10), n); col = mix(col, vec3(0.35,0.22,0.08), n2*n2*0.8);
+      col *= 1.0 - 0.6*length(uv-0.5); gl_FragColor = vec4(col, 1.0); }` });
+const bgScene = new THREE.Scene(); bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+// Bord
+const boardGroup = new THREE.Group(); scene.add(boardGroup);
+const sq = (r, c) => new THREE.Vector3(c - N/2 + 0.5, 0, r - N/2 + 0.5);
+const frame = new THREE.Mesh(new THREE.BoxGeometry(N + 0.8, 0.4, N + 0.8), new THREE.MeshStandardMaterial({ color: 0x4a2c15, roughness: 0.6 }));
+frame.position.y = -0.21; frame.receiveShadow = true; boardGroup.add(frame);
+const lightMat = new THREE.MeshStandardMaterial({ color: 0xe9d8b4, roughness: 0.7 });
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.7 });
+const squares = [];
+for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1, 0.1, 1), (r + c) % 2 ? darkMat : lightMat);
+  m.position.copy(sq(r, c)); m.position.y = -0.05; m.receiveShadow = true; m.userData.rc = [r, c];
+  boardGroup.add(m); squares.push(m);
+}
+// Markeringen
+const hlGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.04, 24);
+const hlMat = new THREE.MeshBasicMaterial({ color: 0x4ade80, transparent: true, opacity: 0.85 });
+const selMat = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.5 });
+const selRing = new THREE.Mesh(new THREE.RingGeometry(0.4, 0.48, 32), selMat); selRing.rotation.x = -Math.PI/2; selRing.visible = false; boardGroup.add(selRing);
+const lastMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18 });
+const lastFrom = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), lastMat), lastTo = lastFrom.clone();
+[lastFrom, lastTo].forEach(m => { m.rotation.x = -Math.PI/2; m.position.y = 0.011; m.visible = false; boardGroup.add(m); });
+const hlGroup = new THREE.Group(); boardGroup.add(hlGroup);
+
+// Stukken
+const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf5f0e6, roughness: 0.35, metalness: 0.05 });
+const blackMat = new THREE.MeshStandardMaterial({ color: 0x1c1c22, roughness: 0.4, metalness: 0.2 });
+const pieceGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.16, 40);
+const crownGeo = new THREE.TorusGeometry(0.22, 0.05, 12, 32);
+const pieces = new Map(); // "r,c" -> mesh
+function makePiece(v) {
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(pieceGeo, v % 2 ? whiteMat : blackMat); m.castShadow = true; m.position.y = 0.08; g.add(m);
+  if (v >= 3) {
+    const m2 = new THREE.Mesh(pieceGeo, m.material); m2.position.y = 0.24; m2.castShadow = true; g.add(m2);
+    const crown = new THREE.Mesh(crownGeo, new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.8, roughness: 0.3 }));
+    crown.rotation.x = Math.PI/2; crown.position.y = 0.34; g.add(crown);
+  }
+  g.userData.v = v; return g;
+}
+
+// Geluid
+let actx = null, muted = localStorage.getItem('mute') === '1';
+const muteBtn = document.getElementById('mute'); muteBtn.textContent = muted ? '🔇' : '🔊';
+muteBtn.onclick = () => { muted = !muted; localStorage.setItem('mute', muted ? '1' : '0'); muteBtn.textContent = muted ? '🔇' : '🔊'; };
+function ac() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); return actx; }
+addEventListener('pointerdown', () => ac(), { once: true });
+function tone(freq, dur, type = 'sine', vol = 0.3, slide = 0, delay = 0) {
+  if (muted) return; const c = ac(); const t = c.currentTime + delay;
+  const o = c.createOscillator(), g = c.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(c.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+const sfx = {
+  select: () => tone(700, 0.05, 'square', 0.04),
+  move: () => tone(180, 0.1, 'sine', 0.3, -60),
+  capture: () => { tone(120, 0.15, 'sine', 0.4, -50); tone(900, 0.08, 'square', 0.06, -400, 0.05); },
+  king: () => [660, 880, 1320].forEach((f, i) => tone(f, 0.2, 'triangle', 0.2, 0, i * 0.08)),
+  win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.35, 'triangle', 0.25, 0, i * 0.12)),
+  lose: () => [400, 330, 262].forEach((f, i) => tone(f, 0.4, 'sawtooth', 0.12, -30, i * 0.2)),
+  join: () => { tone(660, 0.1, 'sine', 0.2); tone(880, 0.15, 'sine', 0.2, 0, 0.1); },
+};
+
+// Camera: wit kijkt van onder (rij 9), zwart van boven. Slepen draait.
+let me = 0, yaw = 0, pitch = 1.05, dragging = false, dragMoved = false, lastX = 0, lastY = 0;
+function updateCamera() {
+  const base = me === 2 ? Math.PI : 0, a = base + yaw, d = 15.5;
+  camera.position.set(Math.sin(a) * Math.cos(pitch) * d, Math.sin(pitch) * d, Math.cos(a) * Math.cos(pitch) * d);
+  camera.lookAt(0, 0, 0);
+}
+updateCamera();
+
+// Netwerk
+let state = null, prevState = null, selected = null;
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?game=dammen&code=' + window.KAMER);
+let full = false;
+ws.onmessage = e => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'welcome') { me = m.player; updateCamera(); const n = localStorage.getItem('naam'); if (n) { document.getElementById('naamIn').value = n; ws.send(JSON.stringify({ type: 'naam', naam: n })); } }
+  if (m.type === 'full') { full = true; hud.textContent = 'Spel is vol: er zijn al 2 spelers verbonden.'; }
+  if (m.type === 'state') applyState(m);
+};
+ws.onclose = () => { if (!full) hud.textContent = 'Verbinding verbroken. Ververs de pagina.'; };
+document.getElementById('naamOk').onclick = () => { const n = document.getElementById('naamIn').value.trim(); if (!n) return; localStorage.setItem('naam', n); ws.send(JSON.stringify({ type: 'naam', naam: n })); };
+document.getElementById('naamIn').onkeydown = e => { if (e.key === 'Enter') document.getElementById('naamOk').click(); };
+resetBtn.onclick = () => ws.send(JSON.stringify({ type: 'reset' }));
+
+const anims = [];
+function applyState(s) {
+  prevState = state; state = s;
+  const names = s.names || ['', ''];
+  const both = s.connected[0] && s.connected[1];
+  if (prevState && !(prevState.connected[0] && prevState.connected[1]) && both) sfx.join();
+
+  // Stukken synchroniseren: verplaatste stukken animeren
+  const key = (r, c) => r + ',' + c;
+  if (s.last && prevState && pieces.has(key(...s.last.from)) && !pieces.has(key(...s.last.to))) {
+    const p = pieces.get(key(...s.last.from)); pieces.delete(key(...s.last.from)); pieces.set(key(...s.last.to), p);
+    anims.push({ obj: p, from: p.position.clone(), to: sq(...s.last.to), t: 0, dur: 0.35 });
+    if (s.last.cap) { sfx.capture(); const cp = pieces.get(key(...s.last.cap)); if (cp) { cp.userData.dying = 0; } } else sfx.move();
+  }
+  for (const [k, p] of pieces) {
+    const [r, c] = k.split(',').map(Number); const v = s.board[r][c];
+    if (v === 0 && p.userData.dying === undefined) { boardGroup.remove(p); pieces.delete(k); }
+    else if (v && v !== 5 && v !== p.userData.v) { boardGroup.remove(p); pieces.delete(k); if (v >= 3) sfx.king(); }
+  }
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const v = s.board[r][c];
+    if (v && v !== 5 && !pieces.has(key(r, c))) { const p = makePiece(v); p.position.copy(sq(r, c)); boardGroup.add(p); pieces.set(key(r, c), p); }
+  }
+  // Laatste zet markeren
+  lastFrom.visible = lastTo.visible = !!s.last;
+  if (s.last) { lastFrom.position.copy(sq(...s.last.from)); lastFrom.position.y = 0.011; lastTo.position.copy(sq(...s.last.to)); lastTo.position.y = 0.011; }
+
+  // Selectie: bij meerslag automatisch het stuk selecteren
+  selected = s.cont && s.turn === me ? s.cont : null;
+  if (!selected && s.turn === me && !s.winner) {
+    const froms = new Set(s.moves.map(m => m.from.join(',')));
+    if (froms.size === 1) selected = s.moves[0].from;
+  }
+  showHighlights();
+
+  if (prevState && !prevState.winner && s.winner) { if (s.winner === me) sfx.win(); else sfx.lose(); }
+  const dot = p => `<b style="background:${p === 1 ? '#f5f0e6' : '#1c1c22'}"></b>`;
+  const naam = p => names[p-1] ? names[p-1] + (p === me ? ' (jij)' : '') : (p === me ? 'jij' : 'vriend');
+  const mustCap = s.moves.length && s.moves[0].cap;
+  if (!both) hud.innerHTML = `Jij speelt ${dot(me)}${me === 1 ? 'wit' : 'zwart'}. Wachten op tegenstander…`;
+  else if (s.winner) hud.innerHTML = `${dot(s.winner)}${s.winner === me ? 'Jij wint! 🎉' : (names[s.winner-1] || 'Je vriend') + ' wint.'}`;
+  else hud.innerHTML = `${dot(s.turn)}Aan de beurt: ${naam(s.turn)}${s.turn === me ? (s.cont ? ' — sla verder!' : mustCap ? ' — je moet slaan' : '') : ''}`;
+  document.getElementById('score').innerHTML = `⚪ ${names[0] || 'Wit'}: ${s.score[0]} &nbsp;·&nbsp; ⚫ ${names[1] || 'Zwart'}: ${s.score[1]}`;
+  resetBtn.style.display = s.winner ? 'block' : 'none';
+}
+function showHighlights() {
+  hlGroup.clear(); selRing.visible = false;
+  if (!state || state.turn !== me || state.winner || !selected) return;
+  selRing.visible = true; selRing.position.copy(sq(...selected)); selRing.position.y = 0.012;
+  for (const m of state.moves) if (m.from[0] === selected[0] && m.from[1] === selected[1]) {
+    const h = new THREE.Mesh(hlGeo, hlMat); h.position.copy(sq(...m.to)); h.position.y = 0.03; hlGroup.add(h);
+  }
+}
+
+// Muis: klikken selecteert/zet, slepen draait
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+function pickSquare(e) {
+  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1); ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(squares)[0]; return hit ? hit.object.userData.rc : null;
+}
+addEventListener('pointerdown', e => { dragging = true; dragMoved = false; lastX = e.clientX; lastY = e.clientY; });
+addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
+  if (dragMoved) { yaw -= dx * 0.005; pitch = Math.min(1.45, Math.max(0.25, pitch + dy * 0.005)); updateCamera(); }
+  lastX = e.clientX; lastY = e.clientY;
+});
+addEventListener('pointerup', e => {
+  dragging = false; if (dragMoved) return;
+  const rc = pickSquare(e); if (!rc || !state || state.turn !== me || state.winner) return;
+  const [r, c] = rc, v = state.board[r][c];
+  const mine = v && v !== 5 && (v % 2 === 1) === (me === 1);
+  if (selected) {
+    const m = state.moves.find(m => m.from[0] === selected[0] && m.from[1] === selected[1] && m.to[0] === r && m.to[1] === c);
+    if (m) { ws.send(JSON.stringify({ type: 'move', from: selected, to: [r, c] })); return; }
+  }
+  if (state.cont) return; // bij meerslag mag je niet wisselen
+  if (mine && state.moves.some(m => m.from[0] === r && m.from[1] === c)) { selected = [r, c]; sfx.select(); showHighlights(); }
+  else { selected = null; showHighlights(); }
+});
+addEventListener('resize', () => { bgMat.uniforms.uRes.value.set(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  for (let i = anims.length - 1; i >= 0; i--) {
+    const a = anims[i]; a.t += dt / a.dur; const k = Math.min(1, a.t), e = k * k * (3 - 2 * k);
+    a.obj.position.lerpVectors(a.from, a.to, e); a.obj.position.y = Math.sin(k * Math.PI) * 0.6;
+    if (k >= 1) { a.obj.position.y = 0; anims.splice(i, 1); }
+  }
+  for (const [k, p] of pieces) if (p.userData.dying !== undefined) {
+    p.userData.dying += dt; p.scale.setScalar(Math.max(0, 1 - p.userData.dying * 2.5)); p.position.y += dt * 1.5;
+    if (p.userData.dying > 0.4) { boardGroup.remove(p); pieces.delete(k); }
+  }
+  bgMat.uniforms.uTime.value = clock.getElapsedTime();
+  renderer.clear(); renderer.render(bgScene, camera); renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

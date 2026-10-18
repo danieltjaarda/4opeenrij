@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>Vier op een rij 3D</title>
+<style>
+  body { margin:0; overflow:hidden; background:#1a1d2e; font-family:system-ui,sans-serif; color:#fff; }
+  #hud { position:fixed; top:16px; left:0; right:0; text-align:center; font-size:20px; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #hud b { display:inline-block; width:14px; height:14px; border-radius:50%; vertical-align:middle; margin-right:6px; }
+  #score { position:fixed; top:52px; left:0; right:0; text-align:center; font-size:15px; opacity:.85; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #naam { position:fixed; top:16px; left:195px; display:flex; gap:6px; }
+  #naam input { padding:6px 10px; border-radius:6px; border:0; font-size:14px; }
+  #naam button { padding:6px 10px; border-radius:6px; border:0; cursor:pointer; }
+  #mute { position:fixed; top:16px; right:16px; background:rgba(255,255,255,.12); border:0; color:#fff; font-size:20px; border-radius:8px; padding:6px 10px; cursor:pointer; }
+  #terug { position:fixed; top:16px; left:16px; color:#fff; text-decoration:none; background:rgba(255,255,255,.12); padding:6px 12px; border-radius:8px; font-size:14px; }
+  #naam { left:100px !important; }
+  #reset { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:10px 22px; font-size:16px; border:0; border-radius:8px; background:#fff; color:#1a1d2e; cursor:pointer; display:none; }
+</style>
+</head>
+<body><script src="/kamer.js"></script>
+<a id="terug" href="/" onclick="this.href='/'+location.search">‹ Menu</a><span style="position:fixed;top:17px;left:92px;font-size:13px;opacity:.75;background:rgba(0,0,0,.35);padding:5px 9px;border-radius:8px;z-index:3;pointer-events:none;text-shadow:none" id="kamerlbl"></span><script>(function(){document.getElementById("kamerlbl").textContent="kamer "+window.KAMER;})()</script>
+<div id="hud">Verbinden…</div>
+<div id="score"></div>
+<div id="naam"><input id="naamIn" maxlength="14" placeholder="Jouw naam"><button id="naamOk">OK</button></div>
+<button id="mute" title="Geluid aan/uit">🔊</button>
+<button id="reset">Nieuw spel</button>
+<script type="importmap">{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+
+const COLS = 7, ROWS = 6, COLORS = [0, 0xe74c3c, 0xf1c40f];
+const hud = document.getElementById('hud');
+const resetBtn = document.getElementById('reset');
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 2, 13);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(5, 10, 8); sun.castShadow = true; scene.add(sun);
+
+
+// ---------- Shaders ----------
+const clock = new THREE.Clock();
+
+// Achtergrond: bewegende nevel + sterren (fullscreen quad)
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false,
+  uniforms: { uTime: { value: 0 }, uRes: { value: new THREE.Vector2(innerWidth, innerHeight) } },
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    uniform float uTime; uniform vec2 uRes;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    float noise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y); }
+    float fbm(vec2 p){ float v=0.0, a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.1; a*=0.5; } return v; }
+    void main(){
+      vec2 uv = gl_FragCoord.xy/uRes; vec2 p = (uv-0.5)*vec2(uRes.x/uRes.y,1.0);
+      float t = uTime*0.05;
+      float n = fbm(p*2.0 + vec2(t, -t*0.7)) ;
+      float n2 = fbm(p*3.0 - vec2(t*0.6, t*0.3));
+      vec3 col = mix(vec3(0.07,0.08,0.16), vec3(0.16,0.10,0.32), n);
+      col = mix(col, vec3(0.05,0.30,0.45), n2*n2*0.8);
+      // sterren
+      vec2 g = floor(gl_FragCoord.xy/3.0); float s = hash(g);
+      float star = step(0.997, s) * (0.6+0.4*sin(uTime*2.0+s*50.0));
+      col += star;
+      col *= 1.0 - 0.6*length(uv-0.5); // vignette
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+const bgScene = new THREE.Scene();
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+renderer.autoClear = false;
+
+// Schijf: fresnel-glans, bewegende highlight, pulserende ring voor winnaars
+function makeDiscMaterial(hex) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(hex) }, uTime: { value: 0 }, uWin: { value: 0 }, uLight: { value: new THREE.Vector3(5,10,8).normalize() } },
+    vertexShader: `
+      varying vec3 vN; varying vec3 vV; varying vec3 vLocal;
+      void main(){ vLocal = position; vN = normalize(normalMatrix*normal);
+        vec4 mv = modelViewMatrix*vec4(position,1.0); vV = -mv.xyz; gl_Position = projectionMatrix*mv; }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform float uTime; uniform float uWin; uniform vec3 uLight;
+      varying vec3 vN; varying vec3 vV; varying vec3 vLocal;
+      void main(){
+        vec3 N = normalize(vN), V = normalize(vV), L = normalize(uLight);
+        float diff = max(dot(N,L),0.0);
+        float spec = pow(max(dot(reflect(-L,N),V),0.0), 48.0);
+        float fres = pow(1.0-max(dot(N,V),0.0), 3.0);
+        vec3 col = uColor*(0.35+0.75*diff) + spec*0.8 + fres*uColor*0.6;
+        // ringen op het schijfvlak
+        float r = length(vLocal.xz);
+        float ring = smoothstep(0.02,0.0,abs(r-0.27)) + smoothstep(0.02,0.0,abs(r-0.15));
+        col += ring*0.25*abs(vLocal.y)/0.11;
+        // winnaar: pulserende witte gloed
+        float pulse = 0.5+0.5*sin(uTime*6.0);
+        col = mix(col, vec3(1.0), uWin*pulse*0.6);
+        gl_FragColor = vec4(col,1.0);
+      }`
+  });
+}
+const discMats = [null, makeDiscMaterial(COLORS[1]), makeDiscMaterial(COLORS[2])];
+
+// Bord: blauwe plaat met gaten
+const boardGroup = new THREE.Group(); scene.add(boardGroup);
+const shape = new THREE.Shape();
+shape.moveTo(-COLS/2, -ROWS/2); shape.lineTo(COLS/2, -ROWS/2); shape.lineTo(COLS/2, ROWS/2); shape.lineTo(-COLS/2, ROWS/2); shape.closePath();
+for (let c=0;c<COLS;c++) for (let r=0;r<ROWS;r++) {
+  const hole = new THREE.Path();
+  hole.absarc(c-COLS/2+0.5, r-ROWS/2+0.5, 0.38, 0, Math.PI*2, true);
+  shape.holes.push(hole);
+}
+const boardMesh = new THREE.Mesh(
+  new THREE.ExtrudeGeometry(shape, { depth: 0.3, bevelEnabled: false }),
+  new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uLight: { value: new THREE.Vector3(5,10,8).normalize() } },
+    vertexShader: `varying vec3 vN; varying vec3 vP; varying vec3 vV;
+      void main(){ vN=normalize(normalMatrix*normal); vP=position; vec4 mv=modelViewMatrix*vec4(position,1.0); vV=-mv.xyz; gl_Position=projectionMatrix*mv; }`,
+    fragmentShader: `uniform float uTime; uniform vec3 uLight; varying vec3 vN; varying vec3 vP; varying vec3 vV;
+      void main(){
+        vec3 N=normalize(vN), V=normalize(vV), L=uLight;
+        float diff=max(dot(N,L),0.0);
+        float spec=pow(max(dot(reflect(-L,N),V),0.0),32.0);
+        vec3 base=vec3(0.12,0.38,0.85);
+        // diagonale lichtstreep die over het bord loopt
+        float sweep=smoothstep(0.0,0.08,0.08-abs(fract((vP.x+vP.y)*0.12+uTime*0.15)-0.5)*0.5);
+        float fres=pow(1.0-max(dot(N,V),0.0),2.0);
+        vec3 col=base*(0.4+0.7*diff)+spec*0.5+sweep*0.15+fres*vec3(0.3,0.6,1.0)*0.5;
+        gl_FragColor=vec4(col,1.0);
+      }`
+  })
+);
+boardMesh.position.z = -0.15; boardMesh.castShadow = boardMesh.receiveShadow = true;
+boardGroup.add(boardMesh);
+// Voet
+const foot = new THREE.Mesh(new THREE.BoxGeometry(COLS+0.6, 0.3, 1.4), new THREE.MeshStandardMaterial({ color: 0x1f4fa8 }));
+foot.position.y = -ROWS/2 - 0.15; foot.receiveShadow = true; boardGroup.add(foot);
+
+// Onzichtbare klikvlakken per kolom
+const columnHits = [];
+for (let c=0;c<COLS;c++) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1, ROWS+1, 0.6), new THREE.MeshBasicMaterial({ visible: false }));
+  m.position.set(c-COLS/2+0.5, 0.5, 0); m.userData.col = c; boardGroup.add(m); columnHits.push(m);
+}
+// Hover-indicator
+const ghost = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.22, 32), new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+ghost.rotation.x = Math.PI/2; ghost.visible = false; boardGroup.add(ghost);
+
+// Schijven
+const discGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.22, 32);
+const discs = new Map(); // key "c,r" -> mesh
+const falling = [];
+function addDisc(c, r, p) {
+  const m = new THREE.Mesh(discGeo, discMats[p].clone());
+  m.userData.player = p;
+  m.rotation.x = Math.PI/2; m.castShadow = true;
+  m.position.set(c-COLS/2+0.5, ROWS/2+1.5, 0);
+  m.userData.targetY = r-ROWS/2+0.5; m.userData.vy = 0;
+  boardGroup.add(m); discs.set(c+','+r, m); falling.push(m);
+}
+
+
+// ---------- Geluid (Web Audio, synthetisch) ----------
+let actx = null, muted = localStorage.getItem('mute') === '1';
+const muteBtn = document.getElementById('mute');
+muteBtn.textContent = muted ? '🔇' : '🔊';
+muteBtn.onclick = () => { muted = !muted; localStorage.setItem('mute', muted ? '1' : '0'); muteBtn.textContent = muted ? '🔇' : '🔊'; };
+function ac() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); return actx; }
+addEventListener('pointerdown', () => ac(), { once: true });
+function tone(freq, dur, type = 'sine', vol = 0.3, slide = 0, delay = 0) {
+  if (muted) return; const c = ac(); const t = c.currentTime + delay;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(c.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+function noiseBurst(dur = 0.08, vol = 0.25) {
+  if (muted) return; const c = ac(); const buf = c.createBuffer(1, c.sampleRate * dur, c.sampleRate);
+  const d = buf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const src = c.createBufferSource(); src.buffer = buf;
+  const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900;
+  const g = c.createGain(); g.gain.value = vol;
+  src.connect(f).connect(g).connect(c.destination); src.start();
+}
+const sfx = {
+  hover: () => tone(600, 0.04, 'square', 0.03),
+  drop: () => tone(300, 0.25, 'triangle', 0.2, -200),
+  land: () => { noiseBurst(0.07, 0.3); tone(140, 0.12, 'sine', 0.35, -60); },
+  bounce: () => tone(220, 0.06, 'sine', 0.12, -80),
+  win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.35, 'triangle', 0.25, 0, i * 0.12)),
+  lose: () => [400, 330, 262].forEach((f, i) => tone(f, 0.4, 'sawtooth', 0.12, -30, i * 0.2)),
+  draw: () => tone(440, 0.5, 'sine', 0.2),
+  join: () => { tone(660, 0.1, 'sine', 0.2); tone(880, 0.15, 'sine', 0.2, 0, 0.1); },
+};
+
+// ---------- Camera-shake ----------
+let shake = 0;
+const camBase = camera.position.clone();
+
+// ---------- Confetti ----------
+const confetti = [];
+const confGeo = new THREE.PlaneGeometry(0.12, 0.2);
+function spawnConfetti(hex) {
+  for (let i = 0; i < 120; i++) {
+    const m = new THREE.Mesh(confGeo, new THREE.MeshBasicMaterial({ color: Math.random() < 0.5 ? hex : 0xffffff, side: THREE.DoubleSide }));
+    m.position.set((Math.random() - 0.5) * 8, ROWS / 2 + 2 + Math.random() * 2, (Math.random() - 0.5) * 3);
+    m.userData.v = new THREE.Vector3((Math.random() - 0.5) * 4, Math.random() * 2, (Math.random() - 0.5) * 2);
+    m.userData.rot = new THREE.Vector3(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+    m.userData.life = 3 + Math.random() * 2;
+    scene.add(m); confetti.push(m);
+  }
+}
+
+// Netwerk
+let me = 0, state = null;
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?game=vier&code=' + window.KAMER);
+ws.onmessage = e => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'welcome') { me = m.player; const n = localStorage.getItem('naam'); if (n) { document.getElementById('naamIn').value = n; ws.send(JSON.stringify({ type: 'naam', naam: n })); } }
+  if (m.type === 'full') { full = true; hud.textContent = 'Spel is vol: er zijn al 2 spelers verbonden. Sluit een andere tab en ververs.'; }
+  if (m.type === 'state') applyState(m);
+};
+let full = false;
+ws.onclose = () => { if (!full) hud.textContent = 'Verbinding verbroken. Ververs de pagina.'; };
+
+let prevState = null;
+function applyState(s) {
+  prevState = state; state = s;
+  const names = s.names || ['', ''];
+  if (prevState && (!prevState.connected[0] || !prevState.connected[1]) && s.connected[0] && s.connected[1]) sfx.join();
+  if (prevState && !prevState.winner && s.winner) {
+    if (s.winner === 3) sfx.draw();
+    else if (s.winner === me) { sfx.win(); spawnConfetti(COLORS[me]); }
+    else sfx.lose();
+  }
+  document.getElementById('score').innerHTML = s.score ? `🔴 ${names[0] || 'Speler 1'}: <b style="background:none;width:auto;height:auto">${s.score[0]}</b> &nbsp;·&nbsp; 🟡 ${names[1] || 'Speler 2'}: ${s.score[1]}` : '';
+  // Verwijder schijven die niet meer bestaan (reset)
+  for (const [k, m] of discs) { const [c, r] = k.split(',').map(Number); if (!s.board[c][r]) { boardGroup.remove(m); discs.delete(k); } }
+  let added = 0;
+  for (let c=0;c<COLS;c++) for (let r=0;r<ROWS;r++) if (s.board[c][r] && !discs.has(c+','+r)) { addDisc(c, r, s.board[c][r]); added++; }
+  if (added === 1 && prevState) sfx.drop();
+  const dot = p => `<b style="background:#${COLORS[p].toString(16).padStart(6,'0')}"></b>`;
+  const naam = p => names[p-1] ? names[p-1] + (p === me ? ' (jij)' : '') : (p === me ? 'jij' : 'vriend');
+  if (!s.connected[0] || !s.connected[1]) hud.innerHTML = `Jij bent ${dot(me)}speler ${me}. Wachten op tegenstander…`;
+  else if (s.winner === 3) hud.innerHTML = 'Gelijkspel!';
+  else if (s.winner) hud.innerHTML = `${dot(s.winner)}${s.winner === me ? 'Jij wint! 🎉' : (names[s.winner-1] || 'Je vriend') + ' wint.'}`;
+  else hud.innerHTML = `${dot(s.turn)}Aan de beurt: ${naam(s.turn)}${s.turn === me ? ' — klik op een kolom' : ''}`;
+  const winSet = new Set((s.winCells || []).map(([c, r]) => c + ',' + r));
+  for (const [k, m] of discs) m.material.uniforms.uWin.value = winSet.has(k) ? 1 : 0;
+  resetBtn.style.display = s.winner ? 'block' : 'none';
+}
+document.getElementById('naamOk').onclick = () => { const n = document.getElementById('naamIn').value.trim(); if (!n) return; localStorage.setItem('naam', n); ws.send(JSON.stringify({ type: 'naam', naam: n })); };
+document.getElementById('naamIn').onkeydown = e => { if (e.key === 'Enter') document.getElementById('naamOk').click(); };
+resetBtn.onclick = () => ws.send(JSON.stringify({ type: 'reset' }));
+
+// Muis
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+let hoverCol = -1;
+function pick(e) {
+  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(columnHits)[0];
+  return hit ? hit.object.userData.col : -1;
+}
+const myTurn = () => state && !state.winner && state.turn === me && state.connected[0] && state.connected[1];
+addEventListener('pointermove', e => {
+  const prev = hoverCol; hoverCol = pick(e);
+  if (hoverCol !== prev && hoverCol >= 0 && myTurn()) sfx.hover();
+  ghost.visible = myTurn() && hoverCol >= 0 && state.board[hoverCol].includes(0);
+  if (ghost.visible) { ghost.position.set(hoverCol-COLS/2+0.5, ROWS/2+0.8, 0); ghost.material.color.setHex(COLORS[me]); }
+});
+addEventListener('pointerdown', e => {
+  const c = pick(e);
+  if (c >= 0 && myTurn()) ws.send(JSON.stringify({ type: 'drop', col: c }));
+});
+addEventListener('resize', () => { bgMat.uniforms.uRes.value.set(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// Animatie
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now-last)/1000, 0.05); last = now;
+  for (let i=falling.length-1;i>=0;i--) {
+    const m = falling[i];
+    m.userData.vy -= 30*dt; m.position.y += m.userData.vy*dt;
+    if (m.position.y <= m.userData.targetY) {
+      m.position.y = m.userData.targetY;
+      if (Math.abs(m.userData.vy) > 2) { if (!m.userData.landed) { sfx.land(); shake = 0.25; m.userData.landed = true; } else sfx.bounce(); m.userData.vy *= -0.3; }
+      else falling.splice(i,1);
+    }
+  }
+  const t = clock.getElapsedTime();
+  bgMat.uniforms.uTime.value = t;
+  boardMesh.material.uniforms.uTime.value = t;
+  for (const m of discs.values()) m.material.uniforms.uTime.value = t;
+  boardGroup.rotation.y = (mouse.x||0) * 0.15;
+  shake = Math.max(0, shake - dt * 1.5);
+  camera.position.set(camBase.x + (Math.random()-0.5)*shake*0.3, camBase.y + (Math.random()-0.5)*shake*0.3, camBase.z);
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i]; c.userData.v.y -= 4 * dt; c.position.addScaledVector(c.userData.v, dt);
+    c.rotation.x += c.userData.rot.x * dt; c.rotation.y += c.userData.rot.y * dt; c.rotation.z += c.userData.rot.z * dt;
+    c.userData.life -= dt; if (c.userData.life <= 0 || c.position.y < -6) { scene.remove(c); confetti.splice(i, 1); }
+  }
+  renderer.clear();
+  renderer.render(bgScene, camera);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

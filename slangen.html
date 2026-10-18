@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="nl"><head><meta charset="utf-8"><title>Slangen & ladders</title>
+<style>
+  body { margin:0; overflow:hidden; background:#1a1d2e; font-family:system-ui,sans-serif; color:#fff; user-select:none; }
+  #hud { position:fixed; top:16px; left:0; right:0; text-align:center; font-size:20px; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #score { position:fixed; top:52px; left:0; right:0; text-align:center; font-size:15px; opacity:.85; pointer-events:none; text-shadow:0 2px 6px #000; }
+  #terug { position:fixed; top:16px; left:16px; color:#fff; text-decoration:none; background:rgba(255,255,255,.12); padding:6px 12px; border-radius:8px; font-size:14px; z-index:3; }
+  #naam { position:fixed; top:16px; left:195px; display:flex; gap:6px; z-index:3; }
+  #naam input { padding:6px 10px; border-radius:6px; border:0; font-size:14px; }
+  #naam button, .btn { padding:6px 12px; border-radius:6px; border:0; cursor:pointer; font-size:14px; }
+  #mute { position:fixed; top:16px; right:16px; background:rgba(255,255,255,.12); border:0; color:#fff; font-size:20px; border-radius:8px; padding:6px 10px; cursor:pointer; z-index:3; }
+  #reset { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:10px 22px; font-size:16px; border:0; border-radius:8px; background:#fff; color:#1a1d2e; cursor:pointer; display:none; z-index:3; }
+  #panel { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; align-items:center; background:rgba(0,0,0,.4); padding:10px 14px; border-radius:12px; z-index:3; }
+  #panel:empty { display:none; }
+  #keys { position:fixed; bottom:16px; left:16px; font-size:12px; opacity:.7; text-shadow:0 1px 4px #000; }
+  #center { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; pointer-events:none; text-align:center; text-shadow:0 4px 14px #000; }
+  #center .t { font-size:80px; font-weight:800; } #center .s { font-size:22px; }
+
+</style></head><body><script src="/kamer.js"></script>
+<a id="terug" href="/" onclick="this.href='/'+location.search">‹ Menu</a><span style="position:fixed;top:17px;left:92px;font-size:13px;opacity:.75;background:rgba(0,0,0,.35);padding:5px 9px;border-radius:8px;z-index:3;pointer-events:none;text-shadow:none" id="kamerlbl"></span><script>(function(){document.getElementById("kamerlbl").textContent="kamer "+window.KAMER;})()</script>
+<div id="hud">Verbinden…</div>
+<div id="score"></div>
+<div id="naam"><input id="naamIn" maxlength="14" placeholder="Jouw naam"><button id="naamOk">OK</button></div>
+<button id="mute" title="Geluid aan/uit">🔊</button>
+<button id="reset">Nieuw spel</button>
+<div id="panel"></div>
+<div id="center"></div>
+<div id="keys"></div>
+<script type="importmap">{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+const GAME = 'slangen', BG = 0x1e3a2f, KEYS = 'Gooi de dobbelsteen · ladder = omhoog, slang = omlaag · 6 = nog een keer · precies 100 om te winnen';
+
+let actx = null, muted = localStorage.getItem('mute') === '1';
+const muteBtn = document.getElementById('mute'); muteBtn.textContent = muted ? '🔇' : '🔊';
+muteBtn.onclick = () => { muted = !muted; localStorage.setItem('mute', muted ? '1' : '0'); muteBtn.textContent = muted ? '🔇' : '🔊'; };
+function ac() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); return actx; }
+addEventListener('pointerdown', () => ac(), { once: true }); addEventListener('keydown', () => ac(), { once: true });
+function tone(freq, dur, type = 'sine', vol = 0.3, slide = 0, delay = 0) {
+  if (muted || !actx) return; const c = actx; const t = c.currentTime + delay;
+  const o = c.createOscillator(), g = c.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur); o.connect(g).connect(c.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+const sfxWin = () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.35, 'triangle', 0.25, 0, i*0.12));
+const sfxLose = () => [400, 330, 262].forEach((f, i) => tone(f, 0.4, 'sawtooth', 0.12, -30, i*0.2));
+const sfxJoin = () => { tone(660, 0.1, 'sine', 0.2); tone(880, 0.15, 'sine', 0.2, 0, 0.1); };
+const click = () => tone(600, 0.05, 'square', 0.08);
+const hud = document.getElementById('hud'), resetBtn = document.getElementById('reset'), panel = document.getElementById('panel'), center = document.getElementById('center');
+const setCenter = h => { if (center.dataset.h !== h) { center.dataset.h = h; center.innerHTML = h; } };
+const setPanel = h => { if (panel.dataset.h !== h) { panel.dataset.h = h; panel.innerHTML = h; } };
+document.getElementById('keys').textContent = KEYS;
+let me = 0, state = null, prevState = null, full = false;
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?game=' + GAME + '&code=' + window.KAMER);
+const send = o => ws.readyState === 1 && ws.send(JSON.stringify(o));
+ws.onmessage = e => { const m = JSON.parse(e.data);
+  if (m.type === 'welcome') { me = m.player; if (typeof onWelcome === 'function') onWelcome(); const n = localStorage.getItem('naam'); if (n) { document.getElementById('naamIn').value = n; send({ type: 'naam', naam: n }); } }
+  else if (m.type === 'full') { full = true; hud.textContent = 'Spel is vol: er zijn al 2 spelers verbonden.'; }
+  else if (m.type === 'state') { prevState = state; state = m; if (prevState && !(prevState.connected[0] && prevState.connected[1]) && m.connected[0] && m.connected[1]) sfxJoin();
+    if (prevState && !prevState.winner && m.winner) { if (m.winner === 3) tone(440, 0.5, 'sine', 0.2); else (m.winner === me ? sfxWin : sfxLose)(); }
+    resetBtn.style.display = m.winner ? 'block' : 'none'; applyState(m); }
+  else if (typeof onOther === 'function') onOther(m); };
+ws.onclose = () => { if (!full) hud.textContent = 'Verbinding verbroken. Ververs de pagina.'; };
+document.getElementById('naamOk').onclick = () => { const n = document.getElementById('naamIn').value.trim(); if (!n) return; localStorage.setItem('naam', n); send({ type: 'naam', naam: n }); };
+for (const ev of ['keydown', 'keyup']) document.getElementById('naamIn').addEventListener(ev, e => { e.stopPropagation(); if (ev === 'keydown' && e.key === 'Enter') document.getElementById('naamOk').click(); });
+resetBtn.onclick = () => send({ type: 'reset' });
+const naamVan = (p, s) => (s.names && s.names[p-1]) ? s.names[p-1] + (p === me ? ' (jij)' : '') : (p === me ? 'jij' : 'vriend');
+const both = s => s.connected[0] && s.connected[1];
+const dot = (p, c1 = '#e63946', c2 = '#4cc9f0') => `<b style="display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:middle;margin-right:6px;background:${p === 1 ? c1 : c2}"></b>`;
+function stdHud(s, extra) { if (!both(s)) hud.innerHTML = `Jij bent ${dot(me)}speler ${me}. Wachten op tegenstander…`;
+  else if (s.winner === 3) hud.innerHTML = 'Gelijkspel!'; else if (s.winner) hud.innerHTML = `${dot(s.winner)}${s.winner === me ? 'Jij wint! 🎉' : naamVan(s.winner, s) + ' wint.'}`;
+  else hud.innerHTML = extra || `${dot(s.turn)}Aan de beurt: ${naamVan(s.turn, s)}`;
+  document.getElementById('score').innerHTML = `${dot(1)}${s.names[0] || 'Speler 1'}: ${s.score[0]} &nbsp;·&nbsp; ${dot(2)}${s.names[1] || 'Speler 2'}: ${s.score[1]}`; }
+// 3D basis
+const scene = new THREE.Scene(); scene.background = new THREE.Color(BG);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(innerWidth, innerHeight); renderer.shadowMap.enabled = true; document.body.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 0.7));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(8, 16, 10); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -30, right: 30, top: 30, bottom: -30 }); scene.add(sun);
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+function pick(e, objs) { mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1); ray.setFromCamera(mouse, camera); return ray.intersectObjects(objs, true)[0]; }
+function groundPoint(e, y = 0) { mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1); ray.setFromCamera(mouse, camera); const t = (y - ray.ray.origin.y) / ray.ray.direction.y; return ray.ray.origin.clone().addScaledVector(ray.ray.direction, t); }
+const std = (c, r = 0.4, m = 0.1) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: m });
+function textSprite(text, color = '#fff', size = 4) { const c = document.createElement('canvas'); c.width = 512; c.height = 128; const x = c.getContext('2d'); x.font = 'bold 80px system-ui'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = color; x.fillText(text, 256, 64);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false })); s.scale.set(size, size/4, 1); return s; }
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+let _last = performance.now();
+function _loop(now) { const dt = Math.min(0.05, (now - _last) / 1000); _last = now; if (typeof tick === 'function') tick(dt, now); renderer.render(scene, camera); requestAnimationFrame(_loop); }
+requestAnimationFrame(_loop);
+
+camera.position.set(0, 16, 12); camera.lookAt(0, 0, 0);
+const board = new THREE.Mesh(new THREE.BoxGeometry(10.6, 0.4, 10.6), std(0x5b3a1e, 0.8)); board.position.y = -0.2; board.receiveShadow = true; scene.add(board);
+const posOf = n => { const i = n - 1, r = Math.floor(i / 10), c = r % 2 ? 9 - (i % 10) : i % 10; return new THREE.Vector3(c - 4.5, 0, 4.5 - r); };
+for (let n = 1; n <= 100; n++) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.1, 0.96), std(n % 2 ? 0xfde68a : 0xfef3c7, 0.9)); m.position.copy(posOf(n)); scene.add(m); if (n % 10 === 1 || n % 10 === 0 || n === 100) { const t = textSprite(String(n), '#333', 1.6); t.position.copy(posOf(n)).setY(0.2); scene.add(t); } }
+let J = null;
+function drawJumps(j) { if (J) return; J = new THREE.Group(); scene.add(J); for (const [a, b] of Object.entries(j)) { const from = posOf(+a), to = posOf(b), up = b > +a; const len = from.distanceTo(to); const mid = from.clone().add(to).multiplyScalar(0.5); mid.y = 0.3;
+  if (up) { for (const s of [-0.18, 0.18]) { const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, len), std(0xd97706)); rail.position.copy(mid); rail.lookAt(to.clone().setY(0.3)); rail.translateX(s); J.add(rail); } for (let k = 0.5; k < len; k += 0.6) { const rung = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.06, 0.06), std(0xd97706)); rung.position.lerpVectors(from, to, k / len).setY(0.3); rung.lookAt(to.clone().setY(0.3)); J.add(rung); } }
+  else { const curve = new THREE.CatmullRomCurve3([from.clone().setY(0.3), mid.clone().add(new THREE.Vector3(0.8, 0.2, 0)), to.clone().setY(0.3)]); const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 0.14, 8), std(0x15803d, 0.5)); J.add(tube); const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 12, 8), std(0x15803d)); head.position.copy(from).setY(0.35); J.add(head); } } }
+const pawns = [0xe63946, 0x4cc9f0].map(c => { const m = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.9, 16), std(c, 0.3)); m.position.y = 0.45; m.castShadow = true; scene.add(m); return m; });
+const die = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), std(0xffffff, 0.3)); die.position.set(7, 0.5, 0); scene.add(die); const dieLabel = textSprite('', '#fff', 2); dieLabel.position.set(7, 1.6, 0); scene.add(dieLabel);
+let lastRoll = 0, anims = [null, null];
+function applyState(s) { drawJumps(s.jumps);
+  if (s.rollId !== lastRoll) { lastRoll = s.rollId; tone(300, 0.1, 'square', 0.1); dieLabel.material.map = textSprite(String(s.roll), '#fff', 2).material.map; die.userData.spin = 0.6; if (s.lastJump) setTimeout(() => tone(s.lastJump.to > s.lastJump.from ? 900 : 150, 0.4, s.lastJump.to > s.lastJump.from ? 'triangle' : 'sawtooth', 0.2, s.lastJump.to > s.lastJump.from ? 300 : -80), 500); }
+  s.pos.forEach((p, i) => { const target = p ? posOf(p) : new THREE.Vector3(-5.5, 0, 5.5 - i); target.y = 0.45; target.x += i ? 0.2 : -0.2; anims[i] = target; });
+  stdHud(s, `${dot(s.turn)}Aan de beurt: ${naamVan(s.turn, s)} &nbsp; posities: <span style="color:#e63946">${s.pos[0]}</span> – <span style="color:#4cc9f0">${s.pos[1]}</span>`);
+  setPanel(both(s) && !s.winner && s.turn === me ? '<button class="btn" id="roll">🎲 Gooi</button>' : ''); const b = document.getElementById('roll'); if (b) b.onclick = () => send({ type: 'roll' }); }
+function tick(dt) { anims.forEach((t, i) => { if (t) { pawns[i].position.lerp(t, Math.min(1, dt * 4)); if (pawns[i].position.distanceTo(t) > 0.3) pawns[i].position.y = 0.45 + 0.5; } }); if (die.userData.spin > 0) { die.userData.spin -= dt; die.rotation.x += dt * 15; die.rotation.y += dt * 11; } }
+
+</script></body></html>
